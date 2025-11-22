@@ -1,4 +1,4 @@
-name: Auto VPN Pool (10min)
+name: Auto VPN Pool (60min)
 
 on:
   schedule:
