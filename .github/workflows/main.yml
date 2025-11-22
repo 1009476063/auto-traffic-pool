@@ -1,0 +1,127 @@
+name: Auto VPN Pool (10min)
+
+on:
+  schedule:
+    # Cron 表达式：每60分钟运行一次
+    - cron: '*/60 * * * *'
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Requests
+        run: pip install requests
+
+      - name: Run Auto-Sub Script
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+        run: |
+          python -c "
+          import requests
+          import uuid
+          import os
+          import time
+          import random
+          import urllib3
+
+          # 禁用SSL警告
+          urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+          # === 配置区 ===
+          BASE_URL = 'https://159.138.8.160'
+          MAX_LINES = 100  # 保留100个订阅
+
+          def main():
+              # 1. 随机休眠 1-60秒，避免整点并发被防火墙秒杀
+              sleep_time = random.randint(1, 60)
+              print(f'Sleeping for {sleep_time} seconds...')
+              time.sleep(sleep_time)
+
+              # 2. 生成随机设备ID
+              device_id = str(uuid.uuid4()).replace('-', '')[:16]
+              print(f'Device ID: {device_id}')
+
+              headers = {
+                  'Content-Type': 'application/json',
+                  'User-Agent': 'Shadowrocket/1982 CFNetwork/1333.0.4 Darwin/21.5.0'
+              }
+
+              try:
+                  # 3. 注册/登录
+                  login_url = f'{BASE_URL}/api/v1/passport/auth/loginByDeviceId'
+                  data = {'device_id': device_id, 'invite_token': ''}
+                  
+                  print('Registering...')
+                  # verify=False 用于跳过 IP 直连的 SSL 报错
+                  resp = requests.post(login_url, json=data, headers=headers, verify=False, timeout=15)
+                  
+                  auth_data = resp.json().get('data', {}).get('auth_data')
+                  if not auth_data:
+                      print('Login failed:', resp.text)
+                      return
+
+                  # 4. 获取订阅链接
+                  sub_url_api = f'{BASE_URL}/api/v1/user/getSubscribe'
+                  headers['Authorization'] = auth_data
+                  
+                  print('Fetching sub link...')
+                  sub_resp = requests.get(sub_url_api, headers=headers, verify=False, timeout=15)
+                  new_sub_url = sub_resp.json().get('data', {}).get('subscribe_url')
+
+                  if new_sub_url:
+                      print(f'Got URL: {new_sub_url}')
+                      update_gist(new_sub_url)
+                  else:
+                      print('Failed to get subscription URL')
+
+              except Exception as e:
+                  print(f'Error: {e}')
+
+          def update_gist(new_url):
+              gist_id = os.environ['GIST_ID']
+              token = os.environ['GIST_TOKEN']
+              api_url = f'https://api.github.com/gists/{gist_id}'
+              headers = {'Authorization': f'token {token}'}
+
+              # 读取旧数据
+              try:
+                  r = requests.get(api_url, headers=headers)
+                  content = r.json()['files']['vpn_subs.txt']['content']
+                  lines = content.split('\n')
+              except:
+                  lines = []
+
+              # 插入新数据到第一行
+              # 过滤空行和重复行
+              lines = [line.strip() for line in lines if line.strip()]
+              if new_url not in lines:
+                  lines.insert(0, new_url)
+
+              # 截断：只保留前 MAX_LINES 行
+              if len(lines) > MAX_LINES:
+                  lines = lines[:MAX_LINES]
+                  print(f'Trimmed to top {MAX_LINES} lines')
+
+              final_content = '\n'.join(lines)
+
+              # 上传更新
+              payload = {
+                  'files': {
+                      'vpn_subs.txt': {
+                          'content': final_content
+                      }
+                  }
+              }
+              requests.patch(api_url, headers=headers, json=payload)
+              print('Gist updated successfully!')
+
+          if __name__ == '__main__':
+              main()
+          "
