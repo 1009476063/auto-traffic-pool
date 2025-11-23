@@ -18,6 +18,7 @@ import requests
 import urllib3 # 用于禁用警告
 import base64
 import binascii
+import socket
 
 # 禁用 SSL 警告，以防 IP 直连的证书问题干扰运行
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -154,6 +155,67 @@ def is_hong_kong(node_line):
         return False
 
 
+def parse_node_host_port(node_line):
+    """解析节点链接，提取 host 和 port"""
+    try:
+        # 1. VMESS
+        if node_line.startswith("vmess://"):
+            b64_part = node_line[8:]
+            json_str = decode_base64(b64_part)
+            data = json.loads(json_str)
+            return data.get("add"), data.get("port")
+            
+        # 2. SS / TROJAN / VLESS
+        # 格式通常是 protocol://user:pass@host:port...
+        # 或者 ss://base64...
+        
+        if node_line.startswith("ss://"):
+            # SS 有两种格式，一种是 ss://base64(method:pass@host:port)
+            # 另一种是 ss://base64(method:pass)@host:port
+            body = node_line[5:].split("#")[0]
+            if "@" in body:
+                # 格式: method:pass@host:port
+                # 这里 body 可能是 base64(method:pass)@host:port
+                part = body.split("@")[-1]
+                if ":" in part:
+                    host_str, port_str = part.split(":", 1)
+                    return host_str, int(port_str.split("/")[0].split("?")[0])
+            else:
+                # 纯 base64
+                decoded = decode_base64(body)
+                # 解码后可能是 method:pass@host:port
+                if "@" in decoded:
+                    part = decoded.split("@")[-1]
+                    if ":" in part:
+                        host_str, port_str = part.split(":", 1)
+                        return host_str, int(port_str)
+                        
+        # 通用 URL 解析 (Trojan, Vless)
+        if "://" in node_line and not node_line.startswith("vmess://") and not node_line.startswith("ss://"):
+            parsed = urllib.parse.urlparse(node_line)
+            return parsed.hostname, parsed.port
+
+    except Exception as e:
+        # print(f"[PARSE] Failed to parse node: {e}")
+        pass
+    return None, None
+
+
+def tcp_latency_check(host, port, timeout=1.5):
+    """TCP 握手测速/连通性检查"""
+    if not host or not port:
+        return False, 9999
+        
+    try:
+        start_time = time.time()
+        sock = socket.create_connection((host, int(port)), timeout=timeout)
+        latency = (time.time() - start_time) * 1000
+        sock.close()
+        return True, latency
+    except:
+        return False, 9999
+
+
 def fetch_and_parse_nodes(subscribe_url):
     """下载订阅链接内容并解析为节点列表"""
     
@@ -207,18 +269,31 @@ def fetch_and_parse_nodes(subscribe_url):
                 decoded_content = decode_base64(content)
                 nodes = [line.strip() for line in decoded_content.split('\n') if line.strip()]
                 
-                # 过滤香港节点
+                # 过滤香港节点 + 测速筛选
                 filtered_nodes = []
+                print(f"[CHECK] Starting connectivity check for {len(nodes)} nodes...")
+                
                 for node in nodes:
-                    if not is_hong_kong(node):
-                        filtered_nodes.append(node)
+                    # 1. 剔除香港节点
+                    if is_hong_kong(node):
+                        continue
+                        
+                    # 2. 测速/连通性检查
+                    host, port = parse_node_host_port(node)
+                    if host and port:
+                        is_alive, latency = tcp_latency_check(host, port)
+                        if is_alive:
+                            # print(f"[ALIVE] {host}:{port} - {latency:.0f}ms")
+                            filtered_nodes.append(node)
+                        else:
+                            # print(f"[DEAD] {host}:{port}")
+                            pass
                     else:
-                        # Optional: print dropped nodes for debug
-                        # print(f"[FILTER] Dropped HK node")
-                        pass
+                        # 解析失败的节点，保守起见保留或丢弃？这里选择保留，防止误杀
+                        filtered_nodes.append(node)
                 
                 if filtered_nodes:
-                    print(f"[FETCH] Successfully parsed {len(filtered_nodes)} nodes (Filtered {len(nodes) - len(filtered_nodes)} HK nodes).")
+                    print(f"[FETCH] Successfully parsed {len(filtered_nodes)} nodes (Filtered {len(nodes) - len(filtered_nodes)} bad/HK nodes).")
                     return filtered_nodes
             except Exception as e:
                 print(f"[ERROR] Base64 decode failed: {e}")
@@ -226,7 +301,18 @@ def fetch_and_parse_nodes(subscribe_url):
                 nodes = [line.strip() for line in content.split('\n') if line.strip()]
                 
                 # 同样过滤
-                filtered_nodes = [n for n in nodes if not is_hong_kong(n)]
+                filtered_nodes = []
+                for n in nodes:
+                    if is_hong_kong(n):
+                        continue
+                    host, port = parse_node_host_port(n)
+                    if host and port:
+                        is_alive, _ = tcp_latency_check(host, port)
+                        if is_alive:
+                            filtered_nodes.append(n)
+                    else:
+                        filtered_nodes.append(n)
+
                 if filtered_nodes:
                     return filtered_nodes
 
