@@ -109,13 +109,30 @@ def fetch_and_parse_nodes(subscribe_url):
     """下载订阅链接内容并解析为节点列表"""
     try:
         print(f"[FETCH] Downloading nodes from: {subscribe_url}")
-        headers = {
-            "User-Agent": "Shadowrocket/1082 CFNetwork/1333.0.4 Darwin/21.5.0"
-        }
-        resp = requests.get(subscribe_url, headers=headers, verify=False, timeout=30)
-        resp.raise_for_status()
         
-        content = resp.text.strip()
+        # 尝试使用 v2rayNG UA，通常能获取到标准的 Base64 订阅
+        headers = {
+            "User-Agent": "2rayNG/1.8.5"
+        }
+        
+        try:
+            resp = requests.get(subscribe_url, headers=headers, verify=False, timeout=30)
+            resp.raise_for_status()
+            content = resp.text.strip()
+        except Exception as e:
+            print(f"[FETCH] v2rayNG UA failed: {e}")
+            content = ""
+
+        # 如果内容为空，尝试使用默认 UA (即不带特定 UA)
+        if not content:
+            print("[FETCH] Content empty or failed with v2rayNG UA. Retrying with generic UA...")
+            try:
+                resp = requests.get(subscribe_url, verify=False, timeout=30)
+                resp.raise_for_status()
+                content = resp.text.strip()
+            except Exception as e:
+                print(f"[FETCH] Generic UA failed: {e}")
+        
         print(f"[DEBUG] Raw content length: {len(content)}")
         print(f"[DEBUG] Raw content preview: {content[:500]}")
         
