@@ -109,11 +109,18 @@ def fetch_and_parse_nodes(subscribe_url):
     """下载订阅链接内容并解析为节点列表"""
     try:
         print(f"[FETCH] Downloading nodes from: {subscribe_url}")
-        resp = requests.get(subscribe_url, verify=False, timeout=30)
+        headers = {
+            "User-Agent": "Shadowrocket/1082 CFNetwork/1333.0.4 Darwin/21.5.0"
+        }
+        resp = requests.get(subscribe_url, headers=headers, verify=False, timeout=30)
         resp.raise_for_status()
         
         content = resp.text.strip()
+        print(f"[DEBUG] Raw content length: {len(content)}")
+        print(f"[DEBUG] Raw content preview: {content[:500]}")
+        
         if not content:
+            print("[ERROR] Content is empty")
             return []
             
         # 尝试 Base64 解码
