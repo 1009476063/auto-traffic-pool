@@ -16,13 +16,15 @@ import urllib.parse
 import time
 import requests
 import urllib3 # 用于禁用警告
+import base64
+import binascii
 
 # 禁用 SSL 警告，以防 IP 直连的证书问题干扰运行
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- 配置 ---
 BASE_URL = "https://159.138.8.160"
-MAX_LINES = 100  # 保留的订阅链接最大数量
+MAX_LINES = 2000  # 保留的节点最大数量 (约 50-100 个订阅的量)
 GIST_FILE_NAME = "vpn_subs.txt" # Gist 中的文件名
 
 # --- 核心逻辑函数 ---
@@ -95,13 +97,54 @@ def login_and_get_subscribe_url():
         return None
 
 
-def update_gist(new_url):
-    """读取 Gist 现有内容，在顶部插入新链接，并保持最大行数"""
+def decode_base64(data):
+    """处理可能带或不带 padding 的 Base64 字符串"""
+    missing_padding = len(data) % 4
+    if missing_padding:
+        data += '=' * (4 - missing_padding)
+    return base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
+
+
+def fetch_and_parse_nodes(subscribe_url):
+    """下载订阅链接内容并解析为节点列表"""
+    try:
+        print(f"[FETCH] Downloading nodes from: {subscribe_url}")
+        resp = requests.get(subscribe_url, verify=False, timeout=30)
+        resp.raise_for_status()
+        
+        content = resp.text.strip()
+        if not content:
+            return []
+            
+        # 尝试 Base64 解码
+        try:
+            decoded_content = decode_base64(content)
+            # 按行分割，过滤空行
+            nodes = [line.strip() for line in decoded_content.split('\n') if line.strip()]
+            print(f"[FETCH] Successfully parsed {len(nodes)} nodes.")
+            return nodes
+        except Exception as e:
+            print(f"[ERROR] Base64 decode failed: {e}")
+            # 如果解码失败，可能返回的是明文或其他格式，视情况而定
+            # 这里假设如果是明文，直接按行分割
+            return [line.strip() for line in content.split('\n') if line.strip()]
+
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch nodes: {e}")
+        return []
+
+
+def update_gist(new_nodes):
+    """读取 Gist 现有内容，在顶部插入新节点，并保持最大行数"""
     gist_id = os.environ.get('GIST_ID')
     token = os.environ.get('GIST_TOKEN')
 
     if not gist_id or not token:
         print("[ERROR] GIST_ID or GIST_TOKEN environment variables not found.")
+        return False
+
+    if not new_nodes:
+        print("[GIST] No new nodes to update.")
         return False
 
     api_url = f'https://api.github.com/gists/{gist_id}'
@@ -114,27 +157,28 @@ def update_gist(new_url):
         r.raise_for_status()
         current_gist = r.json()
         
-        # 尝试从指定文件名获取内容，如果文件不存在则创建一个空列表
+        # 尝试从指定文件名获取内容
         old_content = current_gist['files'].get(GIST_FILE_NAME, {}).get('content', '')
         
-        # 2. 处理内容：去空行，去重
-        lines = [line.strip() for line in old_content.split('\n') if line.strip()]
+        # 2. 处理内容：去空行
+        current_nodes = [line.strip() for line in old_content.split('\n') if line.strip()]
         
-        # 插入新数据到第一行，并去重
-        if new_url not in lines:
-            lines.insert(0, new_url)
-            print("[GIST] New URL added to the pool.")
-        else:
-            print("[GIST] URL already exists. Skipping insertion.")
-            
-        # 3. 截断：只保留前 MAX_LINES 行
-        if len(lines) > MAX_LINES:
-            lines = lines[:MAX_LINES]
-            print(f"[GIST] Pool trimmed to top {MAX_LINES} lines.")
+        # 3. 插入新数据到顶部 (去重)
+        # 为了保持顺序，我们先把新节点加进去，然后用 dict.fromkeys 去重保持顺序
+        # 新节点在前
+        combined_nodes = new_nodes + current_nodes
+        unique_nodes = list(dict.fromkeys(combined_nodes))
+        
+        print(f"[GIST] Merged {len(new_nodes)} new nodes with {len(current_nodes)} existing nodes. Total unique: {len(unique_nodes)}")
 
-        final_content = '\n'.join(lines)
+        # 4. 截断：只保留前 MAX_LINES 行
+        if len(unique_nodes) > MAX_LINES:
+            unique_nodes = unique_nodes[:MAX_LINES]
+            print(f"[GIST] Pool trimmed to top {MAX_LINES} nodes.")
 
-        # 4. 上传更新
+        final_content = '\n'.join(unique_nodes)
+
+        # 5. 上传更新
         payload = {
             'files': {
                 GIST_FILE_NAME: {
@@ -165,7 +209,11 @@ def main():
     subscribe_url = login_and_get_subscribe_url()
     
     if subscribe_url:
-        update_gist(subscribe_url)
+        nodes = fetch_and_parse_nodes(subscribe_url)
+        if nodes:
+            update_gist(nodes)
+        else:
+            print("[MAIN] No nodes parsed from subscription. Skipping update.")
     else:
         print("\n[MAIN] Failed to get subscribe URL. Aborting Gist update.")
         sys.exit(1)
@@ -173,4 +221,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

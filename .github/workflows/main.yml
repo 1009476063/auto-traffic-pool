@@ -4,7 +4,7 @@ name: Auto VPN Pool Refresher
 on:
   schedule:
     # Cron 表达式：*/10 * * * * 表示每小时的第 0, 10, 20, 30, 40, 50 分钟运行
-    - cron: '*/60 * * * *'
+    - cron: '0 * * * *'
   workflow_dispatch: # 允许手动点击按钮测试
 
 jobs:
