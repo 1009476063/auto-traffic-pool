@@ -201,19 +201,31 @@ def parse_node_host_port(node_line):
     return None, None
 
 
-def tcp_latency_check(host, port, timeout=1.5):
-    """TCP 握手测速/连通性检查"""
+def smart_connectivity_check(host, port, timeout=3, retries=2):
+    """
+    智能连通性检查 (仿 Quantumult X 机制)
+    - Timeout: 3秒 (与 QX 默认一致)
+    - Retries: 重试机制，避免网络抖动误杀
+    """
     if not host or not port:
         return False, 9999
         
-    try:
-        start_time = time.time()
-        sock = socket.create_connection((host, int(port)), timeout=timeout)
-        latency = (time.time() - start_time) * 1000
-        sock.close()
-        return True, latency
-    except:
-        return False, 9999
+    for i in range(retries):
+        try:
+            start_time = time.time()
+            sock = socket.create_connection((host, int(port)), timeout=timeout)
+            latency = (time.time() - start_time) * 1000
+            sock.close()
+            return True, latency
+        except:
+            # 如果是最后一次尝试且失败，则返回 False
+            if i == retries - 1:
+                return False, 9999
+            # 否则继续重试
+            time.sleep(0.5)
+            continue
+            
+    return False, 9999
 
 
 def fetch_and_parse_nodes(subscribe_url):
@@ -278,10 +290,10 @@ def fetch_and_parse_nodes(subscribe_url):
                     if is_hong_kong(node):
                         continue
                         
-                    # 2. 测速/连通性检查
+                    # 2. 测速/连通性检查 (QX 风格)
                     host, port = parse_node_host_port(node)
                     if host and port:
-                        is_alive, latency = tcp_latency_check(host, port)
+                        is_alive, latency = smart_connectivity_check(host, port)
                         if is_alive:
                             # print(f"[ALIVE] {host}:{port} - {latency:.0f}ms")
                             filtered_nodes.append(node)
@@ -289,7 +301,7 @@ def fetch_and_parse_nodes(subscribe_url):
                             # print(f"[DEAD] {host}:{port}")
                             pass
                     else:
-                        # 解析失败的节点，保守起见保留或丢弃？这里选择保留，防止误杀
+                        # 解析失败的节点，保守起见保留
                         filtered_nodes.append(node)
                 
                 if filtered_nodes:
@@ -307,7 +319,7 @@ def fetch_and_parse_nodes(subscribe_url):
                         continue
                     host, port = parse_node_host_port(n)
                     if host and port:
-                        is_alive, _ = tcp_latency_check(host, port)
+                        is_alive, _ = smart_connectivity_check(host, port)
                         if is_alive:
                             filtered_nodes.append(n)
                     else:
