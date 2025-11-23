@@ -107,55 +107,70 @@ def decode_base64(data):
 
 def fetch_and_parse_nodes(subscribe_url):
     """下载订阅链接内容并解析为节点列表"""
+    
+    urls_to_try = [subscribe_url]
+    
+    # 尝试构造 IP 直连 URL (Bypass DNS/CDN blocking)
     try:
-        print(f"[FETCH] Downloading nodes from: {subscribe_url}")
-        
-        # 尝试使用 v2rayNG UA，通常能获取到标准的 Base64 订阅
-        headers = {
-            "User-Agent": "2rayNG/1.8.5"
-        }
-        
-        try:
-            resp = requests.get(subscribe_url, headers=headers, verify=False, timeout=30)
-            resp.raise_for_status()
-            content = resp.text.strip()
-        except Exception as e:
-            print(f"[FETCH] v2rayNG UA failed: {e}")
-            content = ""
-
-        # 如果内容为空，尝试使用默认 UA (即不带特定 UA)
-        if not content:
-            print("[FETCH] Content empty or failed with v2rayNG UA. Retrying with generic UA...")
-            try:
-                resp = requests.get(subscribe_url, verify=False, timeout=30)
-                resp.raise_for_status()
-                content = resp.text.strip()
-            except Exception as e:
-                print(f"[FETCH] Generic UA failed: {e}")
-        
-        print(f"[DEBUG] Raw content length: {len(content)}")
-        print(f"[DEBUG] Raw content preview: {content[:500]}")
-        
-        if not content:
-            print("[ERROR] Content is empty")
-            return []
-            
-        # 尝试 Base64 解码
-        try:
-            decoded_content = decode_base64(content)
-            # 按行分割，过滤空行
-            nodes = [line.strip() for line in decoded_content.split('\n') if line.strip()]
-            print(f"[FETCH] Successfully parsed {len(nodes)} nodes.")
-            return nodes
-        except Exception as e:
-            print(f"[ERROR] Base64 decode failed: {e}")
-            # 如果解码失败，可能返回的是明文或其他格式，视情况而定
-            # 这里假设如果是明文，直接按行分割
-            return [line.strip() for line in content.split('\n') if line.strip()]
-
+        parsed = urllib.parse.urlparse(subscribe_url)
+        # 替换域名为 IP (从 BASE_URL 提取，这里直接硬编码配置里的 IP)
+        ip_host = "159.138.8.160" 
+        if parsed.hostname != ip_host:
+            new_url = parsed._replace(netloc=ip_host).geturl()
+            urls_to_try.append(new_url)
+            print(f"[FETCH] Added fallback IP URL: {new_url}")
     except Exception as e:
-        print(f"[ERROR] Failed to fetch nodes: {e}")
-        return []
+        print(f"[FETCH] Failed to construct fallback URL: {e}")
+
+    for url in urls_to_try:
+        try:
+            print(f"[FETCH] Downloading nodes from: {url}")
+            
+            # 轮询 UA，模拟不同客户端
+            user_agents = [
+                "Shadowrocket/1082 CFNetwork/1333.0.4 Darwin/21.5.0",
+                "2rayNG/1.8.5",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ]
+            
+            content = ""
+            for ua in user_agents:
+                try:
+                    headers = {"User-Agent": ua}
+                    print(f"[FETCH] Trying UA: {ua[:20]}...")
+                    resp = requests.get(url, headers=headers, verify=False, timeout=30)
+                    resp.raise_for_status()
+                    content = resp.text.strip()
+                    if content:
+                        print(f"[FETCH] Success with UA: {ua[:20]}...")
+                        break
+                except Exception as e:
+                    print(f"[FETCH] Failed with UA {ua[:20]}: {e}")
+            
+            if not content:
+                print(f"[FETCH] Failed to get content from {url}")
+                continue
+
+            print(f"[DEBUG] Raw content length: {len(content)}")
+            
+            # 尝试 Base64 解码
+            try:
+                decoded_content = decode_base64(content)
+                nodes = [line.strip() for line in decoded_content.split('\n') if line.strip()]
+                if nodes:
+                    print(f"[FETCH] Successfully parsed {len(nodes)} nodes.")
+                    return nodes
+            except Exception as e:
+                print(f"[ERROR] Base64 decode failed: {e}")
+                # 可能是明文
+                nodes = [line.strip() for line in content.split('\n') if line.strip()]
+                if nodes:
+                    return nodes
+
+        except Exception as e:
+            print(f"[ERROR] Failed to fetch from {url}: {e}")
+            
+    return []
 
 
 def update_gist(new_nodes):
