@@ -24,7 +24,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- 配置 ---
 BASE_URL = "https://159.138.8.160"
-MAX_LINES = 2000  # 保留的节点最大数量 (约 50-100 个订阅的量)
+BASE_URL = "https://159.138.8.160"
+MAX_LINES = 200  # 保留的节点最大数量
+GIST_FILE_NAME = "vpn_subs.txt" # Gist 中的文件名
 GIST_FILE_NAME = "vpn_subs.txt" # Gist 中的文件名
 
 # --- 核心逻辑函数 ---
@@ -105,6 +107,53 @@ def decode_base64(data):
     return base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
 
 
+def is_hong_kong(node_line):
+    """检查节点是否为香港节点"""
+    keywords = ["香港", "HK", "Hong Kong", "HongKong", "Hongkong"]
+    
+    try:
+        # 1. 处理 VMESS
+        if node_line.startswith("vmess://"):
+            b64_part = node_line[8:]
+            try:
+                json_str = decode_base64(b64_part)
+                node_data = json.loads(json_str)
+                name = node_data.get("ps", "").upper()
+                for kw in keywords:
+                    if kw.upper() in name:
+                        return True
+                return False
+            except:
+                pass # 解码失败，回退到简单字符串匹配
+        
+        # 2. 处理 SS/Trojan/Vless (检查 URL fragment)
+        # 格式: protocol://...@...?#name
+        if "#" in node_line:
+            name_part = node_line.split("#")[-1]
+            try:
+                name = urllib.parse.unquote(name_part).upper()
+                for kw in keywords:
+                    if kw.upper() in name:
+                        return True
+            except:
+                pass
+                
+        # 3. 兜底：简单字符串匹配 (可能会误杀，但对于 HK 这种关键词风险较小)
+        # 如果上面解析都失败了，或者协议不明确，直接查字符串
+        upper_line = node_line.upper()
+        # 排除协议头，只查内容，避免误杀 key 里的字符 (虽然概率极低)
+        # 简单处理：直接查
+        # for kw in keywords:
+        #     if kw.upper() in upper_line:
+        #         return True
+        
+        return False
+        
+    except Exception as e:
+        print(f"[FILTER] Error checking node: {e}")
+        return False
+
+
 def fetch_and_parse_nodes(subscribe_url):
     """下载订阅链接内容并解析为节点列表"""
     
@@ -157,15 +206,29 @@ def fetch_and_parse_nodes(subscribe_url):
             try:
                 decoded_content = decode_base64(content)
                 nodes = [line.strip() for line in decoded_content.split('\n') if line.strip()]
-                if nodes:
-                    print(f"[FETCH] Successfully parsed {len(nodes)} nodes.")
-                    return nodes
+                
+                # 过滤香港节点
+                filtered_nodes = []
+                for node in nodes:
+                    if not is_hong_kong(node):
+                        filtered_nodes.append(node)
+                    else:
+                        # Optional: print dropped nodes for debug
+                        # print(f"[FILTER] Dropped HK node")
+                        pass
+                
+                if filtered_nodes:
+                    print(f"[FETCH] Successfully parsed {len(filtered_nodes)} nodes (Filtered {len(nodes) - len(filtered_nodes)} HK nodes).")
+                    return filtered_nodes
             except Exception as e:
                 print(f"[ERROR] Base64 decode failed: {e}")
                 # 可能是明文
                 nodes = [line.strip() for line in content.split('\n') if line.strip()]
-                if nodes:
-                    return nodes
+                
+                # 同样过滤
+                filtered_nodes = [n for n in nodes if not is_hong_kong(n)]
+                if filtered_nodes:
+                    return filtered_nodes
 
         except Exception as e:
             print(f"[ERROR] Failed to fetch from {url}: {e}")
