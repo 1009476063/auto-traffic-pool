@@ -19,6 +19,7 @@ import urllib3 # 用于禁用警告
 import base64
 import binascii
 import socket
+import concurrent.futures
 
 # 禁用 SSL 警告，以防 IP 直连的证书问题干扰运行
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -334,68 +335,107 @@ def fetch_and_parse_nodes(subscribe_url):
     return []
 
 
+def check_nodes_parallel(nodes, max_workers=20):
+    """
+    并行检测节点连通性
+    """
+    valid_nodes = []
+    print(f"[CHECK] Starting parallel connectivity check for {len(nodes)} nodes with {max_workers} workers...")
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 提交所有任务
+        future_to_node = {executor.submit(smart_connectivity_check, *parse_node_host_port(node)): node for node in nodes}
+        
+        for future in concurrent.futures.as_completed(future_to_node):
+            node = future_to_node[future]
+            try:
+                is_alive, latency = future.result()
+                if is_alive:
+                    valid_nodes.append(node)
+            except Exception as e:
+                pass
+                
+    print(f"[CHECK] Finished. {len(valid_nodes)}/{len(nodes)} nodes are alive.")
+    return valid_nodes
+
+
 def update_gist(new_nodes):
-    """读取 Gist 现有内容，在顶部插入新节点，并保持最大行数"""
-    gist_id = os.environ.get('GIST_ID')
-    token = os.environ.get('GIST_TOKEN')
+    """更新 Gist，全量清洗"""
+    if not GIST_TOKEN or not GIST_ID:
+        print("[ERROR] GIST_TOKEN or GIST_ID not set.")
+        return
 
-    if not gist_id or not token:
-        print("[ERROR] GIST_ID or GIST_TOKEN environment variables not found.")
-        return False
-
-    if not new_nodes:
-        print("[GIST] No new nodes to update.")
-        return False
-
-    api_url = f'https://api.github.com/gists/{gist_id}'
-    headers = {'Authorization': f'token {token}'}
-
+    headers = {
+        "Authorization": f"token {GIST_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    
+    # 1. 获取现有 Gist 内容
+    gist_url = f"https://api.github.com/gists/{GIST_ID}"
     try:
-        # 1. 读取旧数据
-        print(f"[GIST] Reading existing Gist content...")
-        r = requests.get(api_url, headers=headers)
-        r.raise_for_status()
-        current_gist = r.json()
+        response = requests.get(gist_url, headers=headers)
+        response.raise_for_status()
+        gist_data = response.json()
+        files = gist_data.get("files", {})
         
-        # 尝试从指定文件名获取内容
-        old_content = current_gist['files'].get(GIST_FILE_NAME, {}).get('content', '')
+        existing_content = ""
+        if GIST_FILE_NAME in files:
+            existing_content = files[GIST_FILE_NAME].get("content", "")
+            
+        # 解析现有节点 (处理 Base64 或明文)
+        existing_nodes = []
+        if existing_content:
+            try:
+                # 尝试 Base64 解码
+                decoded = decode_base64(existing_content)
+                existing_nodes = [line.strip() for line in decoded.split('\n') if line.strip()]
+            except:
+                # 可能是明文
+                existing_nodes = [line.strip() for line in existing_content.split('\n') if line.strip()]
         
-        # 2. 处理内容：去空行
-        current_nodes = [line.strip() for line in old_content.split('\n') if line.strip()]
+        print(f"[GIST] Found {len(existing_nodes)} existing nodes.")
         
-        # 3. 插入新数据到顶部 (去重)
-        # 为了保持顺序，我们先把新节点加进去，然后用 dict.fromkeys 去重保持顺序
-        # 新节点在前
-        combined_nodes = new_nodes + current_nodes
-        unique_nodes = list(dict.fromkeys(combined_nodes))
+        # 2. 合并新旧节点
+        # 新节点在前，旧节点在后
+        all_nodes = new_nodes + existing_nodes
         
-        print(f"[GIST] Merged {len(new_nodes)} new nodes with {len(current_nodes)} existing nodes. Total unique: {len(unique_nodes)}")
-
-        # 4. 截断：只保留前 MAX_LINES 行
-        if len(unique_nodes) > MAX_LINES:
-            unique_nodes = unique_nodes[:MAX_LINES]
-            print(f"[GIST] Pool trimmed to top {MAX_LINES} nodes.")
-
-        final_content = '\n'.join(unique_nodes)
-
-        # 5. 上传更新
-        payload = {
-            'files': {
+        # 3. 去重 (保持顺序)
+        seen = set()
+        unique_nodes = []
+        for node in all_nodes:
+            if node not in seen:
+                unique_nodes.append(node)
+                seen.add(node)
+                
+        # 4. 全量测速清洗 (并行)
+        # 只有当总节点数 > 0 时才检查
+        if unique_nodes:
+            final_nodes = check_nodes_parallel(unique_nodes)
+        else:
+            final_nodes = []
+            
+        # 5. 截断到最大数量
+        final_nodes = final_nodes[:MAX_LINES]
+        
+        # 6. 编码并更新
+        updated_content = "\n".join(final_nodes)
+        base64_content = base64.b64encode(updated_content.encode('utf-8')).decode('utf-8')
+        
+        data = {
+            "files": {
                 GIST_FILE_NAME: {
-                    'content': final_content
+                    "content": base64_content
                 }
             }
         }
-        print(f"[GIST] Updating Gist {gist_id}...")
-        requests.patch(api_url, headers=headers, json=payload)
-        print("✅ Gist updated successfully!")
+        
+        patch_response = requests.patch(gist_url, headers=headers, json=data)
+        patch_response.raise_for_status()
+        print(f"[GIST] Successfully updated Gist with {len(final_nodes)} active nodes.")
         return True
-
-    except requests.exceptions.RequestException as e:
-        print(f"[ERROR] Gist API operation failed: {str(e)}")
-        return False
+        
     except Exception as e:
-        print(f"[ERROR] An unexpected error occurred during Gist update: {str(e)}")
+        print(f"[ERROR] Failed to update Gist: {e}")
         return False
 
 
