@@ -112,9 +112,46 @@ def decode_base64(data):
     return base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
 
 
-def is_hong_kong(node_line):
-    """检查节点是否为香港节点"""
-    keywords = ["香港", "HK", "Hong Kong", "HongKong", "Hongkong"]
+def is_whitelisted(node_line):
+    """检查节点是否在白名单中 (如有效期提示节点)"""
+    keywords = ["套餐到期", "长期有效", "剩余流量"]
+    try:
+        # 1. VMESS
+        if node_line.startswith("vmess://"):
+            b64_part = node_line[8:]
+            try:
+                json_str = decode_base64(b64_part)
+                node_data = json.loads(json_str)
+                name = node_data.get("ps", "")
+                for kw in keywords:
+                    if kw in name:
+                        return True
+            except:
+                pass
+        
+        # 2. 其他协议或 URL fragment
+        if "#" in node_line:
+            name_part = node_line.split("#")[-1]
+            try:
+                name = urllib.parse.unquote(name_part)
+                for kw in keywords:
+                    if kw in name:
+                        return True
+            except:
+                pass
+                
+    except:
+        pass
+    return False
+
+
+def should_exclude_node(node_line):
+    """检查节点是否需要过滤 (香港节点、免费节点)"""
+    # 如果是白名单节点，直接放行，不进行黑名单检查
+    if is_whitelisted(node_line):
+        return False
+        
+    keywords = ["香港", "HK", "Hong Kong", "HongKong", "Hongkong", "免费", "Free"]
     
     try:
         # 1. 处理 VMESS
@@ -143,11 +180,8 @@ def is_hong_kong(node_line):
             except:
                 pass
                 
-        # 3. 兜底：简单字符串匹配 (可能会误杀，但对于 HK 这种关键词风险较小)
-        # 如果上面解析都失败了，或者协议不明确，直接查字符串
+        # 3. 兜底：简单字符串匹配
         upper_line = node_line.upper()
-        # 排除协议头，只查内容，避免误杀 key 里的字符 (虽然概率极低)
-        # 简单处理：直接查
         # for kw in keywords:
         #     if kw.upper() in upper_line:
         #         return True
@@ -334,8 +368,13 @@ def fetch_and_parse_nodes(subscribe_url):
                 print(f"[CHECK] Starting connectivity check for {len(nodes)} nodes...")
                 
                 for node in nodes:
-                    # 1. 剔除香港节点
-                    if is_hong_kong(node):
+                    # 1. 剔除黑名单节点 (HK, 免费)，但保留白名单 (套餐信息)
+                    if should_exclude_node(node):
+                        continue
+                        
+                    # 2. 白名单节点直接保留，不测速 (因为它们不是真实节点)
+                    if is_whitelisted(node):
+                        filtered_nodes.append(node)
                         continue
                         
                     # 2. 测速/连通性检查 (QX 风格 + SSL + SNI)
@@ -363,7 +402,11 @@ def fetch_and_parse_nodes(subscribe_url):
                 # 同样过滤
                 filtered_nodes = []
                 for n in nodes:
-                    if is_hong_kong(n):
+                    if should_exclude_node(n):
+                        continue
+                    
+                    if is_whitelisted(n):
+                        filtered_nodes.append(n)
                         continue
                     host, port, is_tls, sni = parse_node_host_port(n)
                     if host and port:
@@ -390,8 +433,17 @@ def check_nodes_parallel(nodes, max_workers=20):
     print(f"[CHECK] Starting parallel connectivity check for {len(nodes)} nodes with {max_workers} workers...")
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # 提交所有任务
-        future_to_node = {executor.submit(smart_connectivity_check, *parse_node_host_port(node)): node for node in nodes}
+        future_to_node = {}
+        
+        for node in nodes:
+            # 白名单节点直接保留，不进行测速
+            if is_whitelisted(node):
+                valid_nodes.append(node)
+                continue
+                
+            # 提交测速任务
+            future = executor.submit(smart_connectivity_check, *parse_node_host_port(node))
+            future_to_node[future] = node
         
         for future in concurrent.futures.as_completed(future_to_node):
             node = future_to_node[future]
