@@ -160,56 +160,62 @@ def is_hong_kong(node_line):
 
 
 def parse_node_host_port(node_line):
-    """解析节点链接，提取 host 和 port"""
+    """解析节点链接，提取 host, port 和 is_tls"""
     try:
         # 1. VMESS
         if node_line.startswith("vmess://"):
             b64_part = node_line[8:]
             json_str = decode_base64(b64_part)
             data = json.loads(json_str)
-            return data.get("add"), data.get("port")
+            host = data.get("add")
+            port = data.get("port")
+            # 判断是否为 TLS
+            is_tls = False
+            if data.get("tls") == "tls" or str(port) == "443":
+                is_tls = True
+            return host, port, is_tls
             
         # 2. SS / TROJAN / VLESS
-        # 格式通常是 protocol://user:pass@host:port...
-        # 或者 ss://base64...
-        
         if node_line.startswith("ss://"):
-            # SS 有两种格式，一种是 ss://base64(method:pass@host:port)
-            # 另一种是 ss://base64(method:pass)@host:port
+            # SS 通常不是 TLS (除非是 plugin，这里简化处理)
             body = node_line[5:].split("#")[0]
             if "@" in body:
-                # 格式: method:pass@host:port
-                # 这里 body 可能是 base64(method:pass)@host:port
                 part = body.split("@")[-1]
                 if ":" in part:
                     host_str, port_str = part.split(":", 1)
-                    return host_str, int(port_str.split("/")[0].split("?")[0])
+                    return host_str, int(port_str.split("/")[0].split("?")[0]), False
             else:
-                # 纯 base64
                 decoded = decode_base64(body)
-                # 解码后可能是 method:pass@host:port
                 if "@" in decoded:
                     part = decoded.split("@")[-1]
                     if ":" in part:
                         host_str, port_str = part.split(":", 1)
-                        return host_str, int(port_str)
+                        return host_str, int(port_str), False
                         
-        # 通用 URL 解析 (Trojan, Vless)
-        if "://" in node_line and not node_line.startswith("vmess://") and not node_line.startswith("ss://"):
+        # 3. Trojan (通常是 TLS)
+        if node_line.startswith("trojan://"):
             parsed = urllib.parse.urlparse(node_line)
-            return parsed.hostname, parsed.port
+            return parsed.hostname, parsed.port, True
+            
+        # 4. VLESS
+        if node_line.startswith("vless://"):
+            parsed = urllib.parse.urlparse(node_line)
+            is_tls = False
+            if "security=tls" in node_line or parsed.port == 443:
+                is_tls = True
+            return parsed.hostname, parsed.port, is_tls
 
     except Exception as e:
-        # print(f"[PARSE] Failed to parse node: {e}")
         pass
-    return None, None
+    return None, None, False
 
 
-def smart_connectivity_check(host, port, timeout=3, retries=2):
+def smart_connectivity_check(host, port, is_tls=False, timeout=3, retries=2):
     """
     智能连通性检查 (仿 Quantumult X 机制)
-    - Timeout: 3秒 (与 QX 默认一致)
-    - Retries: 重试机制，避免网络抖动误杀
+    - Timeout: 3秒
+    - Retries: 重试机制
+    - SSL Handshake: 如果是 TLS 节点，尝试 SSL 握手，更精准判断节点有效性
     """
     if not host or not port:
         return False, 9999
@@ -217,7 +223,16 @@ def smart_connectivity_check(host, port, timeout=3, retries=2):
     for i in range(retries):
         try:
             start_time = time.time()
+            # 建立 TCP 连接
             sock = socket.create_connection((host, int(port)), timeout=timeout)
+            
+            # 如果是 TLS 节点，尝试 SSL 握手
+            if is_tls:
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                sock = context.wrap_socket(sock, server_hostname=host)
+            
             latency = (time.time() - start_time) * 1000
             sock.close()
             return True, latency
@@ -294,10 +309,10 @@ def fetch_and_parse_nodes(subscribe_url):
                     if is_hong_kong(node):
                         continue
                         
-                    # 2. 测速/连通性检查 (QX 风格)
-                    host, port = parse_node_host_port(node)
+                    # 2. 测速/连通性检查 (QX 风格 + SSL)
+                    host, port, is_tls = parse_node_host_port(node)
                     if host and port:
-                        is_alive, latency = smart_connectivity_check(host, port)
+                        is_alive, latency = smart_connectivity_check(host, port, is_tls)
                         if is_alive:
                             # print(f"[ALIVE] {host}:{port} - {latency:.0f}ms")
                             filtered_nodes.append(node)
@@ -321,9 +336,9 @@ def fetch_and_parse_nodes(subscribe_url):
                 for n in nodes:
                     if is_hong_kong(n):
                         continue
-                    host, port = parse_node_host_port(n)
+                    host, port, is_tls = parse_node_host_port(n)
                     if host and port:
-                        is_alive, _ = smart_connectivity_check(host, port)
+                        is_alive, _ = smart_connectivity_check(host, port, is_tls)
                         if is_alive:
                             filtered_nodes.append(n)
                     else:
