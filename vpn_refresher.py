@@ -121,15 +121,23 @@ def should_exclude_node(node_line):
     ]
     
     try:
-        # 0. 全局解码匹配 (最强力、最通用的过滤)
-        # 将整个链接解码，直接查关键词。这能解决 VLESS/Trojan 名字在 fragment 里被编码导致漏网的问题
-        try:
-            decoded_line = urllib.parse.unquote(node_line).upper()
-            for kw in keywords:
-                if kw.upper() in decoded_line:
-                    return True
-        except:
-            pass
+        # 0. 全局递归解码匹配 (最强力、最通用的过滤)
+        # 循环解码最多 3 次，防止双重/三重编码
+        current_line = node_line
+        for _ in range(3):
+            try:
+                decoded = urllib.parse.unquote(current_line)
+                if decoded == current_line:
+                    break # 解码后无变化，停止
+                current_line = decoded
+                
+                # 检查关键词
+                upper_line = current_line.upper()
+                for kw in keywords:
+                    if kw.upper() in upper_line:
+                        return True
+            except:
+                break
 
         # 1. 处理 VMESS (JSON base64)
         if node_line.startswith("vmess://"):
@@ -458,7 +466,12 @@ def update_gist(new_nodes):
         # 4. 全量测速清洗 (并行)
         # 只有当总节点数 > 0 时才检查
         if unique_nodes:
-            final_nodes = check_nodes_parallel(unique_nodes)
+            # 关键修复：在测速前，再次对所有节点（包括旧节点）进行关键词过滤
+            # 防止旧的“漏网之鱼”（如 Info 节点）因为能 Ping 通而一直赖在列表里
+            clean_nodes = [n for n in unique_nodes if not should_exclude_node(n)]
+            print(f"[FILTER] Removed {len(unique_nodes) - len(clean_nodes)} nodes matching blacklist keywords.")
+            
+            final_nodes = check_nodes_parallel(clean_nodes)
         else:
             final_nodes = []
             
