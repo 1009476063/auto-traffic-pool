@@ -112,49 +112,26 @@ def decode_base64(data):
     return base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
 
 
-def is_whitelisted(node_line):
-    """检查节点是否在白名单中 (如有效期提示节点)"""
-    keywords = ["套餐到期", "长期有效", "剩余流量"]
-    try:
-        # 1. VMESS
-        if node_line.startswith("vmess://"):
-            b64_part = node_line[8:]
-            try:
-                json_str = decode_base64(b64_part)
-                node_data = json.loads(json_str)
-                name = node_data.get("ps", "")
-                for kw in keywords:
-                    if kw in name:
-                        return True
-            except:
-                pass
-        
-        # 2. 其他协议或 URL fragment
-        if "#" in node_line:
-            name_part = node_line.split("#")[-1]
-            try:
-                name = urllib.parse.unquote(name_part)
-                for kw in keywords:
-                    if kw in name:
-                        return True
-            except:
-                pass
-                
-    except:
-        pass
-    return False
-
-
 def should_exclude_node(node_line):
-    """检查节点是否需要过滤 (香港节点、免费节点)"""
-    # 如果是白名单节点，直接放行，不进行黑名单检查
-    if is_whitelisted(node_line):
-        return False
-        
-    keywords = ["香港", "HK", "Hong Kong", "HongKong", "Hongkong", "免费", "Free"]
+    """检查节点是否需要过滤 (香港、免费、到期提示等)"""
+    keywords = [
+        "香港", "HK", "Hong Kong", "HongKong", "Hongkong", 
+        "免费", "Free",
+        "套餐到期", "长期有效", "剩余流量"
+    ]
     
     try:
-        # 1. 处理 VMESS
+        # 0. 全局解码匹配 (最强力、最通用的过滤)
+        # 将整个链接解码，直接查关键词。这能解决 VLESS/Trojan 名字在 fragment 里被编码导致漏网的问题
+        try:
+            decoded_line = urllib.parse.unquote(node_line).upper()
+            for kw in keywords:
+                if kw.upper() in decoded_line:
+                    return True
+        except:
+            pass
+
+        # 1. 处理 VMESS (JSON base64)
         if node_line.startswith("vmess://"):
             b64_part = node_line[8:]
             try:
@@ -164,28 +141,13 @@ def should_exclude_node(node_line):
                 for kw in keywords:
                     if kw.upper() in name:
                         return True
-                return False
             except:
-                pass # 解码失败，回退到简单字符串匹配
+                pass 
         
-        # 2. 处理 SS/Trojan/Vless (检查 URL fragment)
-        # 格式: protocol://...@...?#name
-        if "#" in node_line:
-            name_part = node_line.split("#")[-1]
-            try:
-                name = urllib.parse.unquote(name_part).upper()
-                for kw in keywords:
-                    if kw.upper() in name:
-                        return True
-            except:
-                pass
-                
-        # 3. 兜底：简单字符串匹配
-        upper_line = node_line.upper()
-        # for kw in keywords:
-        #     if kw.upper() in upper_line:
-        #         return True
+        return False
         
+    except Exception as e:
+        print(f"[FILTER] Error checking node: {e}")
         return False
         
     except Exception as e:
@@ -368,13 +330,8 @@ def fetch_and_parse_nodes(subscribe_url):
                 print(f"[CHECK] Starting connectivity check for {len(nodes)} nodes...")
                 
                 for node in nodes:
-                    # 1. 剔除黑名单节点 (HK, 免费)，但保留白名单 (套餐信息)
+                    # 1. 剔除黑名单节点 (HK, 免费, 到期提示)
                     if should_exclude_node(node):
-                        continue
-                        
-                    # 2. 白名单节点直接保留，不测速 (因为它们不是真实节点)
-                    if is_whitelisted(node):
-                        filtered_nodes.append(node)
                         continue
                         
                     # 2. 测速/连通性检查 (QX 风格 + SSL + SNI)
@@ -405,9 +362,6 @@ def fetch_and_parse_nodes(subscribe_url):
                     if should_exclude_node(n):
                         continue
                     
-                    if is_whitelisted(n):
-                        filtered_nodes.append(n)
-                        continue
                     host, port, is_tls, sni = parse_node_host_port(n)
                     if host and port:
                         is_alive, _ = smart_connectivity_check(host, port, is_tls, sni)
@@ -436,11 +390,6 @@ def check_nodes_parallel(nodes, max_workers=20):
         future_to_node = {}
         
         for node in nodes:
-            # 白名单节点直接保留，不进行测速
-            if is_whitelisted(node):
-                valid_nodes.append(node)
-                continue
-                
             # 提交测速任务
             future = executor.submit(smart_connectivity_check, *parse_node_host_port(node))
             future_to_node[future] = node
