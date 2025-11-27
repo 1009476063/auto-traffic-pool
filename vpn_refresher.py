@@ -27,9 +27,12 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # --- 配置 ---
 BASE_URL = "https://159.138.8.160"
 BASE_URL = "https://159.138.8.160"
-MAX_LINES = 400  # 保留的节点最大数量
+MAX_LINES = 200  # 保留的节点最大数量
 GIST_FILE_NAME = "vpn_subs.txt" # Gist 中的文件名
-GIST_FILE_NAME = "vpn_subs.txt" # Gist 中的文件名
+
+# 从环境变量获取 Gist 配置
+GIST_ID = os.environ.get('GIST_ID')
+GIST_TOKEN = os.environ.get('GIST_TOKEN')
 
 # --- 核心逻辑函数 ---
 
