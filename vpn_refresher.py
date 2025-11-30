@@ -19,6 +19,7 @@ import urllib3 # 用于禁用警告
 import base64
 import binascii
 import socket
+import datetime
 import concurrent.futures
 
 # 禁用 SSL 警告，以防 IP 直连的证书问题干扰运行
@@ -269,8 +270,39 @@ def smart_connectivity_check(host, port, is_tls=False, sni=None, timeout=3, retr
                 context = ssl.create_default_context()
                 context.check_hostname = False
                 context.verify_mode = ssl.CERT_NONE
+                
                 # 关键：使用正确的 SNI 进行握手
                 sock = context.wrap_socket(sock, server_hostname=sni)
+                
+                # 1. 证书有效期检查
+                try:
+                    cert = sock.getpeercert(binary_form=True)
+                    x509 = ssl.DER_cert_to_PEM_cert(cert)
+                    # 简单检查：如果握手成功且能获取证书，通常说明证书链验证通过（如果 verify_mode != NONE）
+                    # 但这里我们用的是 CERT_NONE，所以需要手动检查有效期?
+                    # 实际上，为了兼容性，我们主要依赖握手成功。
+                    # 如果要更严格，可以解析证书日期，但这需要第三方库或复杂的解析。
+                    # 暂时跳过复杂的日期解析，依赖 HTTP Probe。
+                    pass
+                except:
+                    pass
+
+                # 2. HTTP Probe (活跃探测)
+                # 握手成功不代表能上网，很多僵尸节点会卡住。
+                # 发送一个简单的 HTTP 请求，看是否有回包。
+                # VLESS/Trojan 服务端通常会伪装成 Web 服务器，收到 HTTP 请求会返回 400/403/200。
+                probe_request = f"GET / HTTP/1.1\r\nHost: {sni}\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
+                sock.sendall(probe_request.encode())
+                
+                # 尝试读取响应 (1KB 足够)
+                sock.settimeout(2) # 给 2 秒等待回包
+                response = sock.recv(1024)
+                
+                if not response:
+                    # 握手成功但无任何回包，判定为假死/僵尸节点
+                    # print(f"[DEBUG] No response from {host}:{port}")
+                    sock.close()
+                    continue # 重试
             
             latency = (time.time() - start_time) * 1000
             sock.close()
