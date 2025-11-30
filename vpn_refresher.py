@@ -27,8 +27,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # --- 配置 ---
 BASE_URL = "https://159.138.8.160"
 BASE_URL = "https://159.138.8.160"
-MAX_LINES = 400  # 保留的节点最大数量
-GIST_FILE_NAME = "vpn_subs.txt" # Gist 中的文件名
+MAX_LINES = 500  # 限制保留的节点数量 (针对 AI/流媒体优化，保留更多优质节点)
+GIST_FILENAME = "vpn_subs.txt" # Gist 中的文件名
 
 # 从环境变量获取 Gist 配置
 GIST_ID = os.environ.get('GIST_ID')
@@ -115,9 +115,16 @@ def decode_base64(data):
 def should_exclude_node(node_line):
     """检查节点是否需要过滤 (香港、免费、到期提示等)"""
     keywords = [
-        "香港", "HK", "Hong Kong", "HongKong", "Hongkong", 
-        "免费", "Free",
-        "套餐到期", "长期有效", "剩余流量"
+        # 1. 地区过滤 (AI/流媒体不友好地区)
+        "香港", "HK", "Hong Kong", "HongKong", "Hongkong", # OpenAI/Claude 常封锁 HK
+        "CN", "China", "回国", "中国", # 无法访问外网
+        "RU", "Russia", "俄罗斯", # 制裁/封锁
+        "IR", "Iran", "伊拉克", "伊朗", # 封锁
+        "KP", "North Korea", "朝鲜",
+        
+        # 2. 质量/营销过滤
+        "免费", "Free", "网站", "地址", "频道", "群组",
+        "套餐到期", "长期有效", "剩余流量", "距离下次重置", "过期时间"
     ]
     
     try:
