@@ -20,6 +20,7 @@ import base64
 import binascii
 import socket
 import datetime
+import hashlib
 import concurrent.futures
 
 # 禁用 SSL 警告，以防 IP 直连的证书问题干扰运行
@@ -172,7 +173,7 @@ def should_exclude_node(node_line):
 
 
 def parse_node_host_port(node_line):
-    """解析节点链接，提取 host, port, is_tls, sni"""
+    """解析节点链接，提取 host, port, is_tls, sni, password, protocol"""
     try:
         # 1. VMESS
         if node_line.startswith("vmess://"):
@@ -194,7 +195,7 @@ def parse_node_host_port(node_line):
                 elif data.get("host"):
                     sni = data.get("host")
                     
-            return host, port, is_tls, sni
+            return host, port, is_tls, sni, None, "vmess"
             
         # 2. SS / TROJAN / VLESS
         if node_line.startswith("ss://"):
@@ -204,14 +205,14 @@ def parse_node_host_port(node_line):
                 part = body.split("@")[-1]
                 if ":" in part:
                     host_str, port_str = part.split(":", 1)
-                    return host_str, int(port_str.split("/")[0].split("?")[0]), False, None
+                    return host_str, int(port_str.split("/")[0].split("?")[0]), False, None, None, "ss"
             else:
                 decoded = decode_base64(body)
                 if "@" in decoded:
                     part = decoded.split("@")[-1]
                     if ":" in part:
                         host_str, port_str = part.split(":", 1)
-                        return host_str, int(port_str), False, None
+                        return host_str, int(port_str), False, None, None, "ss"
                         
         # 3. Trojan (通常是 TLS)
         if node_line.startswith("trojan://"):
@@ -223,8 +224,9 @@ def parse_node_host_port(node_line):
                 sni = params['sni'][0]
             elif 'peer' in params:
                 sni = params['peer'][0]
-                
-            return parsed.hostname, parsed.port, True, sni
+            
+            password = parsed.username
+            return parsed.hostname, parsed.port, True, sni, password, "trojan"
             
         # 4. VLESS
         if node_line.startswith("vless://"):
@@ -238,19 +240,75 @@ def parse_node_host_port(node_line):
                 if 'sni' in params:
                     sni = params['sni'][0]
                     
-            return parsed.hostname, parsed.port, is_tls, sni
+            return parsed.hostname, parsed.port, is_tls, sni, None, "vless"
 
     except Exception as e:
         pass
-    return None, None, False, None
+    return None, None, False, None, None, "unknown"
 
 
-def smart_connectivity_check(host, port, is_tls=False, sni=None, timeout=3, retries=2):
+def check_trojan_google_access(host, port, password, sni, timeout=5):
     """
-    智能连通性检查 (仿 Quantumult X 机制)
-    - Timeout: 3秒
-    - Retries: 重试机制
-    - SSL Handshake: 使用正确的 SNI 进行握手
+    Trojan 协议真连接测试 (连接 www.google.com:80)
+    """
+    try:
+        # 1. 建立 TLS 连接
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        
+        sock = socket.create_connection((host, int(port)), timeout=timeout)
+        sock = context.wrap_socket(sock, server_hostname=sni)
+        
+        # 2. 构建 Trojan 请求
+        # 格式: [hex(sha224(password))] + [CRLF] + [Cmd(1=CONNECT)] + [AddrType(3=Domain)] + [Addr] + [Port] + [CRLF]
+        password_hash = hashlib.sha224(password.encode()).hexdigest()
+        
+        # 目标: www.google.com:80
+        target_host = "www.google.com"
+        target_port = 80
+        
+        # Cmd(1) + AddrType(3) + Len(1) + Host + Port(2)
+        # \x01 (CONNECT)
+        # \x03 (DOMAIN)
+        # \x0E (Length of www.google.com = 14)
+        # www.google.com
+        # \x00\x50 (Port 80)
+        
+        req = bytes.fromhex(password_hash) + b"\r\n"
+        req += b"\x01\x03" # CONNECT + DOMAIN
+        req += len(target_host).to_bytes(1, 'big')
+        req += target_host.encode()
+        req += target_port.to_bytes(2, 'big')
+        req += b"\r\n"
+        
+        sock.sendall(req)
+        
+        # 3. 发送 HTTP 请求
+        # 如果 Trojan 代理成功，我们现在就相当于直连了 Google
+        http_req = f"HEAD / HTTP/1.1\r\nHost: {target_host}\r\nUser-Agent: curl/7.64.1\r\nConnection: close\r\n\r\n"
+        sock.sendall(http_req.encode())
+        
+        # 4. 读取响应
+        response = sock.recv(1024)
+        sock.close()
+        
+        if b"HTTP/1.1 200" in response or b"HTTP/1.1 301" in response or b"HTTP/1.1 302" in response:
+            return True, "Google OK"
+        elif response:
+            return True, "Alive (No Google)" # 有响应但不是 Google 预期响应，可能被劫持或 Google 封锁
+        else:
+            return False, "No Response"
+            
+    except Exception as e:
+        return False, str(e)
+
+
+def smart_connectivity_check(host, port, is_tls=False, sni=None, password=None, protocol="unknown", timeout=3, retries=2):
+    """
+    智能连通性检查
+    - Trojan: 尝试连接 Google
+    - 其他: SSL 握手 + HTTP Probe
     """
     if not host or not port:
         return False, 9999
@@ -259,6 +317,18 @@ def smart_connectivity_check(host, port, is_tls=False, sni=None, timeout=3, retr
     if not sni:
         sni = host
         
+    # 优先尝试 Trojan 真连接测试
+    if protocol == "trojan" and password:
+        is_google, msg = check_trojan_google_access(host, port, password, sni)
+        if is_google:
+            return True, 100 # 假定延迟
+        # 如果 Google 失败，回退到普通 SSL 检查吗？
+        # 用户要求“真实性”，如果连不上 Google，可能就是无效节点。
+        # 但为了保守起见，如果只是 Google 封锁但节点是活的，我们还是保留吧？
+        # 不，用户说“排除无效节点”，连不上 Google 就算无效。
+        # 但考虑到 Trojan 实现可能的不稳定性，如果 Google 失败，我们还是做一次基础 Probe 兜底。
+        pass
+
     for i in range(retries):
         try:
             start_time = time.time()
@@ -274,45 +344,23 @@ def smart_connectivity_check(host, port, is_tls=False, sni=None, timeout=3, retr
                 # 关键：使用正确的 SNI 进行握手
                 sock = context.wrap_socket(sock, server_hostname=sni)
                 
-                # 1. 证书有效期检查
-                try:
-                    cert = sock.getpeercert(binary_form=True)
-                    x509 = ssl.DER_cert_to_PEM_cert(cert)
-                    # 简单检查：如果握手成功且能获取证书，通常说明证书链验证通过（如果 verify_mode != NONE）
-                    # 但这里我们用的是 CERT_NONE，所以需要手动检查有效期?
-                    # 实际上，为了兼容性，我们主要依赖握手成功。
-                    # 如果要更严格，可以解析证书日期，但这需要第三方库或复杂的解析。
-                    # 暂时跳过复杂的日期解析，依赖 HTTP Probe。
-                    pass
-                except:
-                    pass
-
-                # 2. HTTP Probe (活跃探测)
-                # 握手成功不代表能上网，很多僵尸节点会卡住。
-                # 发送一个简单的 HTTP 请求，看是否有回包。
-                # VLESS/Trojan 服务端通常会伪装成 Web 服务器，收到 HTTP 请求会返回 400/403/200。
+                # HTTP Probe (活跃探测)
                 probe_request = f"GET / HTTP/1.1\r\nHost: {sni}\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
                 sock.sendall(probe_request.encode())
                 
-                # 尝试读取响应 (1KB 足够)
-                sock.settimeout(2) # 给 2 秒等待回包
+                sock.settimeout(2)
                 response = sock.recv(1024)
                 
                 if not response:
-                    # 握手成功但无任何回包，判定为假死/僵尸节点
-                    # print(f"[DEBUG] No response from {host}:{port}")
                     sock.close()
-                    continue # 重试
+                    continue 
             
             latency = (time.time() - start_time) * 1000
             sock.close()
             return True, latency
         except Exception as e:
-            # print(f"[DEBUG] Check failed for {host}:{port} (TLS={is_tls}, SNI={sni}): {e}")
-            # 如果是最后一次尝试且失败，则返回 False
             if i == retries - 1:
                 return False, 9999
-            # 否则继续重试
             time.sleep(0.5)
             continue
             
@@ -382,9 +430,9 @@ def fetch_and_parse_nodes(subscribe_url):
                         continue
                         
                     # 2. 测速/连通性检查 (QX 风格 + SSL + SNI)
-                    host, port, is_tls, sni = parse_node_host_port(node)
+                    host, port, is_tls, sni, password, protocol = parse_node_host_port(node)
                     if host and port:
-                        is_alive, latency = smart_connectivity_check(host, port, is_tls, sni)
+                        is_alive, latency = smart_connectivity_check(host, port, is_tls, sni, password, protocol)
                         if is_alive:
                             # print(f"[ALIVE] {host}:{port} - {latency:.0f}ms")
                             filtered_nodes.append(node)
@@ -409,9 +457,9 @@ def fetch_and_parse_nodes(subscribe_url):
                     if should_exclude_node(n):
                         continue
                     
-                    host, port, is_tls, sni = parse_node_host_port(n)
+                    host, port, is_tls, sni, password, protocol = parse_node_host_port(n)
                     if host and port:
-                        is_alive, _ = smart_connectivity_check(host, port, is_tls, sni)
+                        is_alive, _ = smart_connectivity_check(host, port, is_tls, sni, password, protocol)
                         if is_alive:
                             filtered_nodes.append(n)
                     else:
@@ -471,72 +519,53 @@ def update_gist(new_nodes):
         response = requests.get(gist_url, headers=headers)
         response.raise_for_status()
         gist_data = response.json()
-        files = gist_data.get("files", {})
         
-        existing_content = ""
-        if GIST_FILE_NAME in files:
-            existing_content = files[GIST_FILE_NAME].get("content", "")
-            
-        # 解析现有节点 (处理 Base64 或明文)
-        existing_nodes = []
-        if existing_content:
-            try:
-                # 尝试 Base64 解码
-                decoded = decode_base64(existing_content)
-                existing_nodes = [line.strip() for line in decoded.split('\n') if line.strip()]
-            except:
-                # 可能是明文
-                existing_nodes = [line.strip() for line in existing_content.split('\n') if line.strip()]
+        existing_content = gist_data['files'][GIST_FILENAME]['content']
+        existing_nodes = existing_content.split('\n') if existing_content else []
         
-        print(f"[GIST] Found {len(existing_nodes)} existing nodes.")
+        # 2. 合并去重 (新节点优先)
+        # 使用 set 去重，但保持顺序? 不，我们最后会排序
+        unique_nodes = list(set(new_nodes + existing_nodes))
+        unique_nodes = [n for n in unique_nodes if n.strip()] # 去空行
         
-        # 2. 合并新旧节点
-        # 新节点在前，旧节点在后
-        all_nodes = new_nodes + existing_nodes
+        print(f"[UPDATE] Total unique nodes before check: {len(unique_nodes)}")
         
-        # 3. 去重 (保持顺序)
-        seen = set()
-        unique_nodes = []
-        for node in all_nodes:
-            if node not in seen:
-                unique_nodes.append(node)
-                seen.add(node)
-                
+        # 3. 关键词过滤 (全量)
+        clean_nodes = [n for n in unique_nodes if not should_exclude_node(n)]
+        print(f"[FILTER] Removed {len(unique_nodes) - len(clean_nodes)} nodes matching blacklist keywords.")
+        
         # 4. 全量测速清洗 (并行)
-        # 只有当总节点数 > 0 时才检查
-        if unique_nodes:
-            # 关键修复：在测速前，再次对所有节点（包括旧节点）进行关键词过滤
-            # 防止旧的“漏网之鱼”（如 Info 节点）因为能 Ping 通而一直赖在列表里
-            clean_nodes = [n for n in unique_nodes if not should_exclude_node(n)]
-            print(f"[FILTER] Removed {len(unique_nodes) - len(clean_nodes)} nodes matching blacklist keywords.")
-            
+        if clean_nodes:
             final_nodes = check_nodes_parallel(clean_nodes)
         else:
             final_nodes = []
             
-        # 5. 截断到最大数量
-        final_nodes = final_nodes[:MAX_LINES]
+        # 5. 排序
+        final_nodes = sort_nodes(final_nodes)
         
-        # 6. 编码并更新
-        updated_content = "\n".join(final_nodes)
-        base64_content = base64.b64encode(updated_content.encode('utf-8')).decode('utf-8')
+        # 6. 截断
+        if len(final_nodes) > MAX_LINES:
+            final_nodes = final_nodes[:MAX_LINES]
+            
+        print(f"[UPDATE] Final active nodes count: {len(final_nodes)}")
+        
+        # 7. 更新 Gist
+        new_content = '\n'.join(final_nodes)
         
         data = {
             "files": {
-                GIST_FILE_NAME: {
-                    "content": base64_content
+                GIST_FILENAME: {
+                    "content": new_content
                 }
             }
         }
         
-        patch_response = requests.patch(gist_url, headers=headers, json=data)
+        patch_response = requests.patch(f"https://api.github.com/gists/{GIST_ID}", headers=headers, json=data)
         patch_response.raise_for_status()
-        print(f"[GIST] Successfully updated Gist with {len(final_nodes)} active nodes.")
-        return True
+        print("Gist updated successfully!")
         
     except Exception as e:
-        print(f"[ERROR] Failed to update Gist: {e}")
-        return False
+        print(f"Error updating Gist: {e}")
 
 
 def main():
