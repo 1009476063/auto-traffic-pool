@@ -275,7 +275,8 @@ def check_trojan_google_access(host, port, password, sni, timeout=5):
         # www.google.com
         # \x00\x50 (Port 80)
         
-        req = bytes.fromhex(password_hash) + b"\r\n"
+        # BUG FIX: Trojan 协议要求发送 56 字节的 hex 字符串，而不是 28 字节的 raw bytes
+        req = password_hash.encode() + b"\r\n"
         req += b"\x01\x03" # CONNECT + DOMAIN
         req += len(target_host).to_bytes(1, 'big')
         req += target_host.encode()
@@ -322,11 +323,11 @@ def smart_connectivity_check(host, port, is_tls=False, sni=None, password=None, 
         is_google, msg = check_trojan_google_access(host, port, password, sni)
         if is_google:
             return True, 100 # 假定延迟
-        # 如果 Google 失败，回退到普通 SSL 检查吗？
-        # 用户要求“真实性”，如果连不上 Google，可能就是无效节点。
-        # 但为了保守起见，如果只是 Google 封锁但节点是活的，我们还是保留吧？
-        # 不，用户说“排除无效节点”，连不上 Google 就算无效。
-        # 但考虑到 Trojan 实现可能的不稳定性，如果 Google 失败，我们还是做一次基础 Probe 兜底。
+        
+        # 如果 Google 失败，不要直接放弃！
+        # 可能是 GitHub Action 环境无法连接 Google，或者节点暂时被 Google 封锁但仍可用。
+        # 回退到普通的 SSL 握手 + HTTP Probe 检查。
+        # print(f"[DEBUG] Trojan Google check failed for {host}: {msg}. Falling back to SSL probe.")
         pass
 
     for i in range(retries):
