@@ -345,16 +345,9 @@ def smart_connectivity_check(host, port, is_tls=False, sni=None, password=None, 
                 # 关键：使用正确的 SNI 进行握手
                 sock = context.wrap_socket(sock, server_hostname=sni)
                 
-                # HTTP Probe (活跃探测)
-                probe_request = f"GET / HTTP/1.1\r\nHost: {sni}\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
-                sock.sendall(probe_request.encode())
-                
-                sock.settimeout(2)
-                response = sock.recv(1024)
-                
-                if not response:
-                    sock.close()
-                    continue 
+                # HTTP Probe (活跃探测) - 移除，因为会导致大量误杀
+                # 只要 SSL 握手成功，就认为节点是活的
+                pass
             
             latency = (time.time() - start_time) * 1000
             sock.close()
