@@ -3,7 +3,7 @@ name: Auto VPN Pool Refresher
 # 触发器配置
 on:
   schedule:
-    # Cron 表达式：*/10 * * * * 表示每小时的第 0, 10, 20, 30, 40, 50 分钟运行
+    - cron: '*/30 * * * *' # 每30分钟运行一次的第 0, 10, 20, 30, 40, 50 分钟运行
     - cron: '0 * * * *'
   workflow_dispatch: # 允许手动点击按钮测试
 
