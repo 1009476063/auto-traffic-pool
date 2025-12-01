@@ -502,6 +502,35 @@ def check_nodes_parallel(nodes, max_workers=20):
     return valid_nodes
 
 
+def sort_nodes(nodes):
+    """
+    对节点进行分类和排序
+    优先级: 
+    1. 协议: Trojan (Top) > VMess/SS (Mid) > VLESS (Bottom)
+    2. 名称: 字母顺序
+    """
+    def get_protocol_score(node_line):
+        if node_line.startswith("trojan://"): return 1
+        if node_line.startswith("vmess://"): return 2
+        if node_line.startswith("ss://"): return 2
+        if node_line.startswith("vless://"): return 3
+        return 99
+
+    def get_node_name(node_line):
+        try:
+            if node_line.startswith("vmess://"):
+                data = json.loads(decode_base64(node_line[8:]))
+                return data.get("ps", "")
+            if "#" in node_line:
+                return urllib.parse.unquote(node_line.split("#")[-1])
+        except:
+            pass
+        return ""
+
+    # 排序 key: (协议分数, 名称)
+    return sorted(nodes, key=lambda n: (get_protocol_score(n), get_node_name(n)))
+
+
 def update_gist(new_nodes):
     """更新 Gist，全量清洗"""
     if not GIST_TOKEN or not GIST_ID:
